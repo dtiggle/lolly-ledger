@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Lolly Ledger</title>
+<meta name="theme-color" content="#0a0a0a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Lollies">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);background:#0a0a0a}body{margin:0;-webkit-text-size-adjust:100%}input,select{font-size:16px}</style>
+<script>
+/* Saves everything on this device, in the same shape the page already reads. */
+(() => {
+  const KEY = 'lolly-ledger-data';
+  const load = () => {
+    const d = JSON.parse(localStorage.getItem(KEY) || '{}');
+    return { batches: d.batches || {}, entries: d.entries || {} };
+  };
+  let store = load();
+  const subs = { batches: [], entries: [] };
+  const persist = () => localStorage.setItem(KEY, JSON.stringify(store));
+  const snap = name => ({
+    docs: Object.entries(store[name]).map(([id, body]) => ({ id, data: () => body, metadata: {} })),
+    metadata: { fromCache: false, hasPendingWrites: false },
+  });
+  const fire = name => subs[name].forEach(f => f(snap(name)));
+  const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  const collection = name => ({
+    onSnapshot(next) { subs[name].push(next); queueMicrotask(() => next(snap(name))); return () => {}; },
+    doc(id) {
+      const docId = id || newId();
+      return {
+        id: docId,
+        async set(body) { store[name][docId] = body; persist(); fire(name); },
+        async delete() { delete store[name][docId]; persist(); fire(name); },
+      };
+    },
+  });
+  const save = async ({ filename, data }) => {
+    const type = filename.endsWith('.csv') ? 'text/csv' : 'application/json';
+    const file = new File([data], filename, { type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file] }); return { status: 'saved' }; }
+      catch (e) { if (e.name === 'AbortError') throw { code: 'declined' }; }
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(file); a.download = filename;
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    return { status: 'saved' };
+  };
+  window.localLedger = {
+    dump: () => JSON.stringify({ app: 'lolly-ledger', version: 1, ...store }, null, 2),
+    parse(text) {
+      const d = JSON.parse(text);
+      if (d.app !== 'lolly-ledger' || typeof d.batches !== 'object' || typeof d.entries !== 'object') throw new Error('bad file');
+      return { store: { batches: d.batches, entries: d.entries }, batches: Object.keys(d.batches), entries: Object.keys(d.entries) };
+    },
+    async restore(data) { store = data.store; persist(); fire('batches'); fire('entries'); },
+  };
+  let db = null;
+  try { localStorage.setItem(KEY + '-test', '1'); localStorage.removeItem(KEY + '-test'); db = { collection }; } catch {}
+  window.claude = { use: async n => n === 'db' ? db : n === 'downloads' ? { save } : null };
+  navigator.storage?.persist?.().catch(() => {});
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+</script>
+</head>
+<body>
+<style>
+/* Layout: a one-page shop till. Profit first, then the add form beside the history; stacks on a phone. */
+:root {
+  --bg: #0a0a0a; --surface: #131313; --sunken: #1c1c1c; --line: #2b2b2b;
+  --ink: #f4f4f4; --muted: #9b9b9b;
+  --accent: #f4f4f4; --on-accent: #0a0a0a; --accent-soft: #262626;
+  --good: #4cc38a; --bad: #f2706b; --warn-bg: #241e10; --warn-ink: #eccf85;
+  --display: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  --body: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 16px; line-height: 1.45; }
+.wrap {
+  max-width: 1040px; margin: 0 auto; display: grid; gap: 20px;
+  padding-block: 24px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+h1, h2 { font-family: var(--display); font-weight: 600; letter-spacing: -.01em; margin: 0; text-wrap: balance; }
+h1 { font-size: 1.375rem; }
+h2 { font-size: 1.0625rem; }
+.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.title { min-width: 0; }
+.view { margin: 0; color: var(--muted); font-weight: 500; overflow-wrap: anywhere; }
+.menu-wrap { position: relative; }
+.menu-btn { display: grid; place-items: center; width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; width: min(300px, calc(100vw - 32px)); padding: 6px; display: grid; gap: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 12px 32px rgb(0 0 0 / .6); }
+.menu-item { border: 0; background: transparent; border-radius: 9px; padding: 10px 12px; text-align: left; font-weight: 500; color: var(--bad); }
+.menu-item:hover { background: var(--sunken); }
+.menu-item.plain { color: var(--ink); }
+.menu-item[aria-current="true"] { background: var(--accent-soft); }
+.menu-item.new { color: var(--accent); }
+.menu-main { display: grid; gap: 2px; }
+.menu-label { padding: 6px 12px 2px; }
+.batch-list { display: grid; gap: 2px; max-height: 240px; overflow-y: auto; }
+.menu hr { width: 100%; border: 0; border-top: 1px solid var(--line); margin: 4px 0; }
+form.new-form { border: 0; background: none; padding: 8px; gap: 10px; border-radius: 0; }
+.new-form .primary { flex: none; }
+.batch-link { border: 0; background: none; padding: 0; font-weight: 600; color: var(--accent); text-decoration: none; text-align: left; }
+.batch-link::after { content: " ›"; color: var(--muted); }
+.main.solo { grid-template-columns: minmax(0, 1fr); }
+.reset { display: grid; gap: 8px; padding: 8px; }
+.reset p { margin: 0; font-size: .875rem; }
+.reset-yes { border: 0; border-radius: 8px; padding: 10px; background: var(--bad); color: var(--bg); font-weight: 600; }
+.reset-yes:disabled { opacity: .55; cursor: default; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.notice { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 10px 14px; font-weight: 600; }
+.notice button { border: 1px solid currentColor; background: transparent; color: inherit; border-radius: 8px; padding: 5px 12px; font-weight: 500; }
+
+.profits { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.side { display: grid; gap: 28px; min-width: 0; }
+.sales { display: grid; gap: 10px; min-width: 0; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: right; font-size: .8125rem; color: var(--muted); padding: 0 0 8px 12px; border-bottom: 1px solid var(--line); }
+td { text-align: right; padding: 10px 0 10px 12px; border-bottom: 1px solid var(--line); }
+th:first-child, td:first-child { text-align: left; padding-left: 0; }
+td small { display: block; color: var(--muted); font-size: .875rem; }
+td.sold { font-weight: 500; }
+td.gain { font-weight: 600; color: var(--good); }
+td.loss { font-weight: 600; color: var(--bad); }
+.summary { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 22px; }
+.label { font-size: .8125rem; font-weight: 500; color: var(--muted); }
+.profit { font-family: var(--display); font-weight: 600; font-size: clamp(1.75rem, 6vw, 2.75rem); line-height: 1.1; font-variant-numeric: tabular-nums; }
+.profit.good { color: var(--good); } .profit.bad { color: var(--bad); }
+.sub { color: var(--muted); font-size: .875rem; margin: 4px 0 0; max-width: 34ch; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px 18px; align-content: start; }
+.stat b { display: block; font-size: 1.125rem; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stock { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding-top: 14px; border-top: 1px dashed var(--line); }
+.stock strong { font-weight: 600; }
+.pips { display: inline-flex; gap: 4px; align-items: center; }
+.pip { width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--muted); }
+.pip.on { background: var(--accent); }
+
+.main { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 20px; align-items: start; }
+form { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: grid; gap: 14px; }
+.field { display: grid; gap: 4px; min-width: 0; }
+.field label { font-size: .875rem; font-weight: 500; }
+input, select { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.money { position: relative; }
+.money span { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); }
+.money input { padding-left: 24px; }
+.hint { color: var(--muted); font-size: .875rem; margin: 0; font-variant-numeric: tabular-nums; }
+.hint:empty { display: none; }
+.err { color: var(--bad); font-weight: 500; font-size: .875rem; margin: 0; }
+.actions { display: flex; gap: 8px; }
+.primary { flex: 1; border: 0; border-radius: 8px; padding: 12px; background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.primary:disabled { opacity: .55; cursor: default; }
+.ghost { border: 1px solid var(--line); background: transparent; border-radius: 8px; padding: 10px 14px; font-weight: 500; }
+
+.history { display: grid; gap: 10px; min-width: 0; }
+.history-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+ul { list-style: none; margin: 0; padding: 0; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.row-title { font-weight: 500; overflow-wrap: anywhere; }
+.row-amt { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.row-amt.in { color: var(--good); }
+.row-meta { color: var(--muted); font-size: .875rem; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.row-btns { display: flex; gap: 12px; justify-content: flex-end; }
+.link { border: 0; background: none; padding: 2px 0; color: var(--muted); font-size: .8125rem; font-weight: 500; }
+.link:hover { color: var(--ink); }
+.link.danger { color: var(--bad); }
+.empty { color: var(--muted); padding: 22px 0; margin: 0; }
+
+@media (max-width: 760px) {
+  .stat b { font-size: 1.05rem; }
+  .main { grid-template-columns: minmax(0, 1fr); }
+}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="title">
+      <h1>Lolly Ledger</h1>
+      <p class="view" id="viewName"></p>
+    </div>
+    <div class="menu-wrap" id="menuWrap">
+      <button type="button" class="menu-btn" id="menuBtn" aria-label="Menu" aria-haspopup="true" aria-expanded="false">
+        <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M3 10h14M3 14.5h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <div class="menu" id="menu" hidden>
+        <div class="menu-main" id="menuMain">
+          <span class="label menu-label">Batches</span>
+          <div class="batch-list" id="batchList"></div>
+          <button type="button" class="menu-item plain new" id="newOpen">+ New batch</button>
+          <hr>
+          <button type="button" class="menu-item plain" id="backupBtn">Back up data</button>
+          <button type="button" class="menu-item plain" id="restoreBtn">Restore backup</button>
+          <input id="restoreFile" type="file" accept=".json,application/json" hidden>
+          <button type="button" class="menu-item" id="deleteBatchOpen" hidden>Delete this batch</button>
+          <button type="button" class="menu-item" id="resetOpen">Reset data</button>
+        </div>
+        <form class="new-form" id="newForm" novalidate hidden>
+          <h2>New batch</h2>
+          <div class="field"><label for="newName">Batch name</label><input id="newName" type="text" maxlength="40"></div>
+          <div class="pair">
+            <div class="field"><label for="newBoxes">Boxes bought</label><input id="newBoxes" type="number" min="1" step="1" inputmode="numeric"></div>
+            <div class="field"><label for="newCost">Total paid</label><div class="money"><span>$</span><input id="newCost" type="number" min="0" step="0.01" inputmode="decimal"></div></div>
+          </div>
+          <div class="field"><label for="newDate">Date bought</label><input id="newDate" type="date"></div>
+          <p class="err" id="newErr" hidden></p>
+          <button class="primary" id="newSave" type="submit">Create batch</button>
+          <button class="ghost" id="newCancel" type="button">Back</button>
+        </form>
+        <div class="reset" id="resetConfirm" hidden>
+          <p id="resetText"></p>
+          <button type="button" class="reset-yes" id="resetYes">Delete everything</button>
+          <button type="button" class="ghost" id="resetNo">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="notice" id="status" hidden></div>
+  <div class="notice" id="oversold" hidden></div>
+
+  <section class="summary" aria-label="Summary">
+    <div class="profits">
+      <div>
+        <div class="label">Net profit</div>
+        <div class="profit" id="profit">$0.00</div>
+        <p class="sub">All sales, minus all stock bought.</p>
+      </div>
+      <div>
+        <div class="label">Profit from sales</div>
+        <div class="profit" id="saleProfit">$0.00</div>
+        <p class="sub">What you made on the lollies sold so far. Each sale is listed below.</p>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="label">Sales</span><b id="sSales">$0.00</b></div>
+      <div class="stat"><span class="label">Stock bought</span><b id="sBought">$0.00</b></div>
+      <div class="stat"><span class="label">Cost of lollies sold</span><b id="sCogs">$0.00</b></div>
+      <div class="stock">
+        <span><span class="label">In stock now</span><br><strong id="stockText">0 boxes</strong></span>
+        <span class="pips" id="pips" hidden></span>
+        <span class="label" id="stockValue"></span>
+      </div>
+    </div>
+  </section>
+
+  <div class="main" id="main">
+    <form id="form" novalidate>
+      <h2 id="formTitle">Add a sale</h2>
+      <div class="pair" id="qtyRow">
+        <div class="field"><label for="qty" id="qtyLabel">How many</label><input id="qty" type="number" min="1" step="1" inputmode="numeric"></div>
+        <div class="field" id="unitField"><label for="unit">Sold as</label>
+          <select id="unit"><option value="lolly" selected>Singles</option><option value="box">Boxes</option></select></div>
+      </div>
+      <div class="field"><label for="amount" id="amtLabel">Total received</label>
+        <div class="money"><span>$</span><input id="amount" type="number" min="0" step="0.01" inputmode="decimal"></div></div>
+      <p class="hint" id="hint"></p>
+      <div class="pair">
+        <div class="field"><label for="date">Date</label><input id="date" type="date"></div>
+        <div class="field"><label for="note" id="noteLabel">Note (optional)</label><input id="note" type="text" maxlength="120"></div>
+      </div>
+      <p class="err" id="err" hidden></p>
+      <div class="actions">
+        <button class="primary" id="save" type="submit">Add sale</button>
+        <button class="ghost" id="cancel" type="button" hidden>Cancel</button>
+      </div>
+    </form>
+
+    <div class="side">
+    <section class="sales" id="batchSection" hidden>
+      <h2>Batches</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Batch</th><th scope="col">Cost</th><th scope="col">Sales</th><th scope="col">Net profit</th></tr></thead>
+          <tbody id="batchBody"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="sales">
+      <h2>Profit on each sale</h2>
+      <div class="table-wrap" id="salesTable" hidden>
+        <table>
+          <thead><tr><th scope="col">Sold</th><th scope="col">Received</th><th scope="col">Cost</th><th scope="col">Profit</th></tr></thead>
+          <tbody id="salesBody"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="salesEmpty">No sales in this period.</p>
+    </section>
+    <section class="history">
+      <div class="history-head">
+        <h2>History</h2>
+        <button type="button" class="ghost" id="exportBtn" hidden>Export CSV</button>
+      </div>
+      <ul id="list"></ul>
+      <p class="empty" id="empty">Loading your entries…</p>
+    </section>
+    </div>
+  </div>
+</div>
+
+<script>
+const PER_BOX = 10;
+const $ = id => document.getElementById(id);
+let db = null, col = null, batchCol = null, downloads = null;
+let entries = [], batches = [], selected = null, kind = 'sale', editing = null, confirmDel = null;
+let entriesReady = false, batchesReady = false, confirmAction = null;
+const ready = () => entriesReady && batchesReady;
+try { selected = localStorage.getItem('batch'); } catch {}
+
+const money = c => (c < 0 ? '-' : '') + '$' + (Math.abs(c) / 100).toLocaleString('en-AU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const plural = (n, w) => n + ' ' + w + (n === 1 ? '' : (w === 'box' ? 'es' : ''));
+const lollyWord = n => n + (n === 1 ? ' lolly' : ' lollies');
+const qtyText = e => e.unit === 'lolly' ? lollyWord(e.qty) : plural(e.qty / PER_BOX, 'box');
+const stockText = n => {
+  const b = Math.floor(n / PER_BOX), r = n % PER_BOX;
+  if (!b && !r) return 'No stock';
+  return [b ? plural(b, 'box') : '', r ? lollyWord(r) : ''].filter(Boolean).join(' + ');
+};
+const dateText = (d, opts) => new Date(d + 'T00:00:00').toLocaleDateString('en-AU', opts);
+function today() {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+const byTime = (a, b) => (a.createdAt || 0) - (b.createdAt || 0);
+const sortedBatches = () => [...batches].sort(byTime);
+
+/* The batch on screen. null means the All batches view. */
+function currentBatch() {
+  if (selected === 'all') return null;
+  const list = sortedBatches();
+  return list.find(b => b.id === selected) || list[list.length - 1] || null;
+}
+function select(id) {
+  selected = id;
+  try { localStorage.setItem('batch', id); } catch {}
+  resetForm();
+}
+
+/* Walks one batch's entries in date order and values its stock at average cost per lolly. */
+function compute(list) {
+  const sorted = [...list].sort((a, b) => a.date.localeCompare(b.date) || byTime(a, b));
+  let stock = 0, value = 0, short = 0;
+  const cogs = {};
+  for (const e of sorted) {
+    if (e.kind === 'buy') { stock += e.qty; value += e.cents; }
+    if (e.kind === 'sale') {
+      const take = Math.min(e.qty, stock);
+      const cost = stock ? value * take / stock : 0;
+      cogs[e.id] = cost; stock -= take; value -= cost; short += e.qty - take;
+    }
+  }
+  return { sorted, stock, value, cogs, short };
+}
+function totals(list, cogs) {
+  const t = { sales: 0, cogs: 0, bought: 0 };
+  for (const e of list) {
+    if (e.kind === 'sale') { t.sales += e.cents; t.cogs += cogs[e.id] || 0; }
+    if (e.kind === 'buy') t.bought += e.cents;
+  }
+  t.saleProfit = t.sales - t.cogs;
+  t.net = t.sales - t.bought;
+  return t;
+}
+/* Each batch is costed on its own, then the results are combined for the All batches view. */
+function computeBatches() {
+  const per = {}, all = { stock: 0, value: 0, short: 0, cogs: {} };
+  for (const b of batches) {
+    const c = per[b.id] = compute(entries.filter(e => e.batchId === b.id));
+    all.stock += c.stock; all.value += c.value; all.short += c.short;
+    Object.assign(all.cogs, c.cogs);
+  }
+  return { per, all };
+}
+
+function render() {
+  const { per, all } = computeBatches();
+  const cur = currentBatch();
+  const c = cur ? per[cur.id] : all;
+  const shown = (cur ? c.sorted : compute(entries.filter(e => per[e.batchId])).sorted).slice().reverse();
+  const t = totals(shown, c.cogs);
+  const names = Object.fromEntries(batches.map(b => [b.id, b.name]));
+
+  $('viewName').textContent = cur ? cur.name : 'All batches';
+
+  const p = $('profit');
+  p.textContent = money(t.net);
+  p.className = 'profit ' + (t.net < 0 ? 'bad' : 'good');
+  const sp = $('saleProfit');
+  sp.textContent = money(Math.round(t.saleProfit));
+  sp.className = 'profit ' + (t.saleProfit < 0 ? 'bad' : 'good');
+  $('sSales').textContent = money(t.sales);
+  $('sBought').textContent = money(t.bought);
+  $('sCogs').textContent = money(Math.round(t.cogs));
+
+  $('stockText').textContent = stockText(c.stock);
+  $('stockValue').textContent = c.stock ? 'Worth ' + money(Math.round(c.value)) + ' at cost' : '';
+  const rem = cur ? c.stock % PER_BOX : 0, pips = $('pips');
+  pips.hidden = !rem;
+  pips.setAttribute('aria-label', rem + ' of ' + PER_BOX + ' left in the open box');
+  pips.setAttribute('role', 'img');
+  pips.replaceChildren(...Array.from({ length: PER_BOX }, (_, i) => {
+    const s = document.createElement('span'); s.className = 'pip' + (i < rem ? ' on' : ''); return s;
+  }));
+
+  const o = $('oversold');
+  o.hidden = !c.short;
+  o.textContent = c.short ? 'You have logged ' + lollyWord(c.short) + ' more sold than bought, so profit is too high. Check your entries and dates.' : '';
+
+  $('exportBtn').hidden = !downloads || !entries.length;
+
+  const showForm = !!(cur || editing);
+  $('form').hidden = !showForm;
+  $('main').classList.toggle('solo', !showForm);
+
+  const list = sortedBatches();
+  $('batchSection').hidden = !!cur || !list.length;
+  $('batchBody').replaceChildren(...list.map(b => batchRow(b, per[b.id])));
+  renderMenu(list, cur);
+
+  const sales = shown.filter(e => e.kind === 'sale');
+  $('salesTable').hidden = !sales.length;
+  $('salesEmpty').hidden = !!sales.length;
+  $('salesBody').replaceChildren(...sales.map(e => saleRow(e, c.cogs[e.id] || 0, cur ? '' : names[e.batchId])));
+
+  $('list').replaceChildren(...shown.map(e => rowFor(e, c.cogs[e.id], cur ? '' : names[e.batchId])));
+  const empty = $('empty');
+  empty.hidden = !!shown.length;
+  if (!shown.length) empty.textContent = !ready() ? 'Loading your entries…' : 'No batches yet. Open the menu at the top right and choose New batch.';
+}
+
+function renderMenu(list, cur) {
+  const item = (label, id, on) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'menu-item plain';
+    b.textContent = label;
+    if (on) b.setAttribute('aria-current', 'true');
+    b.onclick = () => { select(id); closeMenu(); };
+    return b;
+  };
+  $('batchList').replaceChildren(item('All batches', 'all', !cur), ...list.map(b => item(b.name, b.id, cur && cur.id === b.id)));
+  $('deleteBatchOpen').hidden = !cur;
+}
+
+function batchRow(b, c) {
+  const t = totals(c.sorted, c.cogs);
+  const tr = document.createElement('tr');
+  const first = document.createElement('td');
+  const open = document.createElement('button');
+  open.type = 'button'; open.className = 'batch-link'; open.textContent = b.name;
+  open.onclick = () => select(b.id);
+  first.append(open);
+  const small = document.createElement('small');
+  small.textContent = c.stock ? stockText(c.stock) + ' left' : 'Sold out';
+  first.append(small);
+  const cell = (text, cls) => { const td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; return td; };
+  tr.append(first, cell(money(t.bought)), cell(money(t.sales)), cell(money(t.net), t.net < 0 ? 'loss' : 'gain'));
+  return tr;
+}
+
+function saleRow(e, cost, batchName) {
+  const tr = document.createElement('tr');
+  const gain = Math.round(e.cents - cost);
+  const first = document.createElement('td'); first.className = 'sold';
+  first.textContent = qtyText(e);
+  const when = document.createElement('small');
+  when.textContent = [dateText(e.date, { day: 'numeric', month: 'short' }), batchName].filter(Boolean).join(' · ');
+  first.append(when);
+  const cell = (text, cls) => { const td = document.createElement('td'); td.textContent = text; if (cls) td.className = cls; return td; };
+  tr.append(first, cell(money(e.cents)), cell(money(Math.round(cost))), cell(money(gain), gain < 0 ? 'loss' : 'gain'));
+  return tr;
+}
+
+function rowFor(e, cost, batchName) {
+  const li = document.createElement('li'); li.className = 'row';
+  const title = document.createElement('div'); title.className = 'row-title';
+  title.textContent = (e.kind === 'sale' ? 'Sold ' : 'Bought ') + qtyText(e);
+  const amt = document.createElement('div');
+  amt.className = 'row-amt' + (e.kind === 'sale' ? ' in' : '');
+  amt.textContent = (e.kind === 'sale' ? '+' : '-') + money(e.cents);
+  const meta = document.createElement('div'); meta.className = 'row-meta';
+  const bits = [dateText(e.date, { day: 'numeric', month: 'short', year: 'numeric' })];
+  if (batchName) bits.push(batchName);
+  if (e.kind === 'sale') bits.push(money(Math.round(e.cents - (cost || 0))) + ' profit');
+  if (e.kind === 'buy') bits.push(money(Math.round(e.cents / (e.qty / PER_BOX))) + ' per box');
+  if (e.note) bits.push(e.note);
+  meta.textContent = bits.join(' · ');
+  const btns = document.createElement('div'); btns.className = 'row-btns';
+  const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'link'; edit.textContent = 'Edit';
+  edit.onclick = () => startEdit(e);
+  const del = document.createElement('button'); del.type = 'button'; del.className = 'link danger';
+  del.textContent = confirmDel === e.id ? 'Tap again to delete' : 'Delete';
+  del.onclick = () => {
+    if (confirmDel !== e.id) { confirmDel = e.id; render(); return; }
+    confirmDel = null;
+    col.doc(e.id).delete().catch(showWriteError);
+  };
+  btns.append(edit, del);
+  li.append(title, amt, meta, btns);
+  return li;
+}
+
+function setKind(k) {
+  kind = k;
+  $('unitField').hidden = k !== 'sale';
+  $('qtyRow').style.gridTemplateColumns = k === 'sale' ? '' : 'minmax(0, 1fr)';
+  $('qtyLabel').textContent = k === 'sale' ? 'How many' : 'Boxes bought';
+  $('amtLabel').textContent = k === 'sale' ? 'Total received' : 'Total paid';
+  $('formTitle').textContent = editing ? 'Edit entry' : 'Add a sale';
+  $('save').textContent = editing ? 'Save changes' : 'Add sale';
+  $('cancel').hidden = !editing;
+  updateHint();
+}
+function updateHint() {
+  const q = parseInt($('qty').value, 10), a = parseFloat($('amount').value), h = $('hint');
+  h.textContent = '';
+  if (!(q > 0) || !(a >= 0)) return;
+  const lollies = (kind === 'sale' && $('unit').value === 'lolly') ? q : q * PER_BOX;
+  const each = a * 100 / lollies;
+  h.textContent = money(Math.round(each * PER_BOX)) + ' per box · ' + money(Math.round(each)) + ' per lolly';
+}
+function resetForm() {
+  editing = null;
+  $('form').reset(); $('date').value = today(); $('err').hidden = true;
+  setKind('sale');
+  render();
+}
+function startEdit(e) {
+  editing = e;
+  $('err').hidden = true;
+  $('qty').value = e.unit === 'lolly' ? e.qty : e.qty / PER_BOX;
+  $('unit').value = e.unit === 'lolly' ? 'lolly' : 'box';
+  $('amount').value = (e.cents / 100).toFixed(2);
+  $('date').value = e.date; $('note').value = e.note || '';
+  setKind(e.kind);
+  render();
+  $('form').scrollIntoView({ block: 'nearest' }); $('amount').focus();
+}
+function fail(msg) { const e = $('err'); e.textContent = msg; e.hidden = false; }
+function showWriteError() { setStatus('That change could not be saved. Check your connection and try again.'); }
+function setStatus(msg) { const s = $('status'); s.textContent = msg || ''; s.hidden = !msg; }
+
+$('form').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  $('err').hidden = true;
+  if (!col) return fail('Saving is not available in this view.');
+  const q = parseInt($('qty').value, 10), a = parseFloat($('amount').value);
+  const note = $('note').value.trim(), date = $('date').value;
+  const batchId = editing ? editing.batchId : currentBatch()?.id;
+  if (!batchId) return fail('Choose a batch from the menu first.');
+  if (!(q > 0 && String(q) === $('qty').value.trim())) return fail('Enter how many as a whole number above 0.');
+  if (!(a >= 0)) return fail('Enter the dollar amount.');
+  if (!date) return fail('Pick a date.');
+  const unit = kind === 'sale' ? $('unit').value : 'box';
+  const body = { kind, date, cents: Math.round(a * 100), note, batchId, createdAt: editing ? editing.createdAt : Date.now() };
+  body.unit = unit;
+  body.qty = unit === 'lolly' ? q : q * PER_BOX;
+  const ref = editing ? col.doc(editing.id) : col.doc();
+  const btn = $('save'); btn.disabled = true;
+  try { await ref.set(body); resetForm(); setStatus(''); }
+  catch { fail('That could not be saved. Check your connection and try again.'); }
+  btn.disabled = false;
+});
+$('cancel').onclick = resetForm;
+['qty', 'amount', 'unit'].forEach(id => $(id).addEventListener('input', updateHint));
+
+/* Menu */
+function showPanel(id) {
+  ['menuMain', 'newForm', 'resetConfirm'].forEach(p => { $(p).hidden = p !== id; });
+}
+function closeMenu() {
+  $('menu').hidden = true;
+  $('menuBtn').setAttribute('aria-expanded', 'false');
+  showPanel('menuMain');
+}
+function askConfirm(text, label, action) {
+  $('resetText').textContent = text;
+  $('resetYes').textContent = label;
+  $('resetYes').hidden = !action;
+  confirmAction = action;
+  showPanel('resetConfirm');
+}
+$('menuBtn').onclick = () => {
+  if (!$('menu').hidden) return closeMenu();
+  $('menu').hidden = false;
+  $('menuBtn').setAttribute('aria-expanded', 'true');
+};
+document.addEventListener('click', e => { if (!$('menu').hidden && !$('menuWrap').contains(e.target)) closeMenu(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('menu').hidden) { closeMenu(); $('menuBtn').focus(); } });
+
+$('newOpen').onclick = () => {
+  $('newForm').reset();
+  $('newName').value = 'Batch ' + (batches.length + 1);
+  $('newDate').value = today();
+  $('newErr').hidden = true;
+  showPanel('newForm');
+  $('newBoxes').focus();
+};
+$('newCancel').onclick = () => showPanel('menuMain');
+$('newForm').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const err = m => { $('newErr').textContent = m; $('newErr').hidden = false; };
+  if (!col) return err('Saving is not available in this view.');
+  const name = $('newName').value.trim(), date = $('newDate').value;
+  const q = parseInt($('newBoxes').value, 10), a = parseFloat($('newCost').value);
+  if (!name) return err('Give the batch a name.');
+  if (!(q > 0 && String(q) === $('newBoxes').value.trim())) return err('Enter the boxes bought as a whole number above 0.');
+  if (!(a >= 0)) return err('Enter the total you paid.');
+  if (!date) return err('Pick a date.');
+  const btn = $('newSave'); btn.disabled = true;
+  try {
+    const now = Date.now(), ref = batchCol.doc();
+    await ref.set({ name, createdAt: now });
+    await col.doc().set({ kind: 'buy', date, cents: Math.round(a * 100), note: '', unit: 'box', qty: q * PER_BOX, batchId: ref.id, createdAt: now });
+    select(ref.id);
+    closeMenu();
+  } catch { err('That could not be saved. Check your connection and try again.'); }
+  btn.disabled = false;
+});
+
+$('deleteBatchOpen').onclick = () => {
+  const b = currentBatch(); if (!b) return;
+  const n = entries.filter(e => e.batchId === b.id).length;
+  askConfirm('This permanently deletes ' + b.name + ' and its ' + n + (n === 1 ? ' entry' : ' entries') + '. It can\'t be undone.', 'Delete batch', async () => {
+    for (const e of entries.filter(x => x.batchId === b.id)) await col.doc(e.id).delete();
+    await batchCol.doc(b.id).delete();
+    selected = null;
+    try { localStorage.removeItem('batch'); } catch {}
+  });
+};
+$('resetOpen').onclick = () => {
+  const n = entries.length, count = batches.length;
+  if (!col) return askConfirm('Saving is not available in this view.', '', null);
+  if (!n && !count) return askConfirm('There is nothing to delete.', '', null);
+  askConfirm('This permanently deletes all ' + plural(count, 'batch').replace('batch', count === 1 ? 'batch' : 'batches') + ' and ' + n + (n === 1 ? ' entry' : ' entries') + '. It can\'t be undone. Export a CSV first if you want a copy.', 'Delete everything', async () => {
+    for (const e of [...entries]) await col.doc(e.id).delete();
+    for (const b of [...batches]) await batchCol.doc(b.id).delete();
+    selected = null;
+    try { localStorage.removeItem('batch'); } catch {}
+  });
+};
+$('resetNo').onclick = closeMenu;
+$('resetYes').onclick = async () => {
+  const btn = $('resetYes'); btn.disabled = true;
+  try { await confirmAction?.(); confirmDel = null; resetForm(); closeMenu(); }
+  catch { closeMenu(); showWriteError(); }
+  btn.disabled = false;
+};
+
+$('backupBtn').onclick = async () => {
+  closeMenu();
+  try { await downloads.save({ filename: 'lolly-ledger-backup-' + today() + '.json', data: window.localLedger.dump() }); }
+  catch (err) { if (err?.code !== 'declined') setStatus('The backup could not be saved.'); }
+};
+$('restoreBtn').onclick = () => $('restoreFile').click();
+$('restoreFile').onchange = async ev => {
+  const file = ev.target.files[0]; ev.target.value = '';
+  if (!file) return;
+  let data;
+  try { data = window.localLedger.parse(await file.text()); }
+  catch { askConfirm('That file is not a Lolly Ledger backup.', '', null); return; }
+  askConfirm('This replaces everything in the app with the backup: ' + data.batches.length + (data.batches.length === 1 ? ' batch' : ' batches') + ' and ' + data.entries.length + (data.entries.length === 1 ? ' entry.' : ' entries.'), 'Restore backup', async () => {
+    selected = null;
+    await window.localLedger.restore(data);
+  });
+};
+
+$('exportBtn').onclick = async () => {
+  const q = s => '"' + String(s ?? '').replace(/"/g, '""') + '"';
+  const rows = [['Batch', 'Date', 'Type', 'Lollies', 'Boxes', 'Amount', 'Note']];
+  const types = { sale: 'Sale', buy: 'Stock bought' };
+  const names = Object.fromEntries(batches.map(b => [b.id, b.name]));
+  for (const e of compute(entries).sorted) {
+    rows.push([names[e.batchId], e.date, types[e.kind], e.qty || '', e.qty ? e.qty / PER_BOX : '', (e.cents / 100).toFixed(2), e.note]);
+  }
+  const csv = rows.map(r => r.map(q).join(',')).join('\r\n');
+  try { await downloads.save({ filename: 'lolly-ledger.csv', data: csv }); }
+  catch (err) { if (err?.code !== 'declined') setStatus('The CSV could not be saved here.'); }
+};
+
+async function start() {
+  $('date').value = today();
+  setKind('sale'); render();
+  [db, downloads] = window.claude?.use ? await Promise.all([window.claude.use('db'), window.claude.use('downloads')]) : [null, null];
+  if (!db) {
+    entriesReady = batchesReady = true; render();
+    $('empty').textContent = 'Your entries are not available in this view.';
+    setStatus('This device could not open its saved data.');
+    return;
+  }
+  col = db.collection('entries');
+  batchCol = db.collection('batches');
+  const timer = setTimeout(() => setStatus('Your entries can\'t be reached yet. Check your connection.'), 10000);
+  const settle = () => { if (ready()) { clearTimeout(timer); if ($('status').textContent.startsWith('Your entries')) setStatus(''); } };
+  const lost = () => { clearTimeout(timer); entriesReady = batchesReady = true; render(); setStatus('Your entries stopped updating. Reopen this page to reconnect.'); };
+  col.onSnapshot(snap => {
+    entries = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (!snap.metadata.fromCache) entriesReady = true;
+    settle(); render();
+  }, lost);
+  batchCol.onSnapshot(snap => {
+    batches = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (!snap.metadata.fromCache) batchesReady = true;
+    settle(); render();
+  }, lost);
+}
+start();
+</script>
+
+</body>
+</html>
